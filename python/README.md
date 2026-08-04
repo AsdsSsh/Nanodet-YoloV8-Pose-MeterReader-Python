@@ -1,0 +1,90 @@
+# Python NCNN Meter Reader
+
+This directory is a Python implementation of the original C++ inference
+pipeline. It uses the checked-in NCNN model files in '../weights'; no model
+conversion is required.
+
+The pipeline is:
+
+~~~text
+image -> NanoDet meter box -> cropped meter ROI -> YOLOv8-Pose keypoints
+      -> OpenCV pointer-line refinement -> angular scale calculation
+~~~
+
+The defaults intentionally match the C++ program:
+
+- NanoDet input: 320 x 320, score threshold 0.3, NMS threshold 0.3
+- YOLOv8-Pose input long side: 320, score threshold 0.25, NMS threshold 0.45
+- Scale range: 0.0 to 1.0 MPa
+- Empirical compensation: +0.012 MPa at or below 0.5, otherwise +0.008 MPa
+- ROI aspect-ratio filter: disabled by default. The C++ threshold of 0.90 was
+  too restrictive for common photographed gauges.
+
+## Setup
+
+Use Python 3.10 or newer if possible. The machine's system Python is 3.8,
+which is end-of-life and may not receive current NCNN wheels.
+
+~~~powershell
+cd python
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+~~~
+
+'opencv-contrib-python' provides the optimized thinning operation used for
+pointer extraction. The implementation has a built-in fallback if the
+contrib module is unavailable.
+
+If 'pip install ncnn' has no wheel for the selected Python version, build the
+official NCNN Python binding for the same interpreter, then rerun the
+commands below. The rest of this project does not need to change.
+
+## Run
+
+Run these commands from 'python/' after activating the environment:
+
+~~~powershell
+python main.py single ..\example.jpg --show
+python main.py folder ..\images --save-dir ..\outputs
+python main.py camera --device 0 --show
+~~~
+
+Useful options:
+
+~~~powershell
+python main.py single ..\example.jpg --json
+python main.py single ..\example.jpg --scale-min 0 --scale-max 1.6 --unit MPa
+python main.py single ..\example.jpg --no-compensation
+python main.py single ..\example.jpg --gpu
+python main.py single ..\example.jpg --aspect-ratio-threshold 0.90
+python main.py single ..\example.jpg --debug
+~~~
+
+The default model directory is '../weights'. Override it with '--weights' when
+deploying model files elsewhere.
+
+Unlike the original C++ implementation, processing does not pause for a GUI
+window unless '--show' is passed. 'folder' accepts JPG, JPEG, PNG, and BMP.
+
+## Verification
+
+The decoder and geometry tests do not require NCNN or OpenCV:
+
+~~~powershell
+$env:PYTHONPATH = (Resolve-Path .)
+python -m unittest discover -s tests -v
+~~~
+
+After dependencies are installed, perform end-to-end verification on a fixed
+set of meter images. Compare the Python JSON output with the original C++
+output for:
+
+1. meter bounding boxes;
+2. three pose classes and their keypoints;
+3. final compensated reading.
+
+Small numeric differences are expected because the Python implementation uses
+standard exponential functions whereas the C++ NanoDet decoder uses an
+approximate fast exponential.

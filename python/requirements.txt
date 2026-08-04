@@ -1,0 +1,4 @@
+numpy==1.24.4; python_version < "3.9"
+numpy>=1.26,<3; python_version >= "3.9"
+opencv-contrib-python==4.10.0.84
+ncnn
