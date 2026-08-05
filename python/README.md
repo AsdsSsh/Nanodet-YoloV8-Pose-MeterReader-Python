@@ -37,6 +37,29 @@ python -m pip install -r requirements.txt
 pointer extraction. The implementation has a built-in fallback if the
 contrib module is unavailable.
 
+### OCR scale-range detection (optional)
+
+The meter scale range is normally fixed (0.0-1.0 MPa) in the configuration.
+To read the range dynamically from the dial instead, install the OCR engine:
+
+~~~powershell
+python -m pip install --no-deps -r requirements-ocr.txt
+~~~
+
+'rapidocr-onnxruntime' must be installed with '--no-deps': its own
+dependencies would pull in 'opencv-python', which conflicts with
+'opencv-contrib-python' and can break the thinning operation. Its runtime
+dependencies are already listed in 'requirements.txt'.
+
+OCR is enabled by default. It crops the two scale-end boxes detected by the
+pose model (left_rect/right_rect), recognizes the numbers next to them, and
+uses the detected range for the reading. When OCR fails or returns an
+unreliable range, the reader silently falls back to the configured static
+scale. The scale actually used is reported in the JSON output
+('scale_source' is 'ocr' or 'config', plus 'scale_begin'/'scale_end').
+Results are cached per meter box so the camera mode does not re-run OCR on
+every frame.
+
 If 'pip install ncnn' has no wheel for the selected Python version, build the
 official NCNN Python binding for the same interpreter, then rerun the
 commands below. The rest of this project does not need to change.
@@ -57,6 +80,8 @@ Useful options:
 python main.py single ..\example.jpg --json
 python main.py single ..\example.jpg --scale-min 0 --scale-max 1.6 --unit MPa
 python main.py single ..\example.jpg --no-compensation
+python main.py single ..\example.jpg --no-ocr-scale
+python main.py single ..\example.jpg --ocr-padding 0.3
 python main.py single ..\example.jpg --gpu
 python main.py single ..\example.jpg --aspect-ratio-threshold 0.90
 python main.py single ..\example.jpg --debug

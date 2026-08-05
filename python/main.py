@@ -23,6 +23,10 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--no-compensation", action="store_true")
+    parser.add_argument("--no-ocr-scale", action="store_true",
+                        help="Disable OCR scale-range detection; use --scale-min/--scale-max")
+    parser.add_argument("--ocr-padding", type=float, default=0.5,
+                        help="Expand the OCR crop around the scale-end boxes by this fraction of box size")
     parser.add_argument("--scale-min", type=float, default=0.0)
     parser.add_argument("--scale-max", type=float, default=1.0)
     parser.add_argument("--unit", default="MPa")
@@ -66,6 +70,8 @@ def create_reader(args: argparse.Namespace) -> MeterReader:
     if not 0.0 <= args.aspect_ratio_threshold < 1.0:
         raise ValueError("--aspect-ratio-threshold must be in [0, 1)")
     config.aspect_ratio_threshold = args.aspect_ratio_threshold
+    config.ocr.enabled = not args.no_ocr_scale
+    config.ocr.crop_padding = args.ocr_padding
     return MeterReader(config)
 
 

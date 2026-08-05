@@ -2,3 +2,16 @@ numpy==1.24.4; python_version < "3.9"
 numpy>=1.26,<3; python_version >= "3.9"
 opencv-contrib-python==4.10.0.84
 ncnn
+# OCR scale-range detection (dynamic meter scale).
+# rapidocr-onnxruntime is NOT listed here on purpose: it depends on
+# opencv-python, which would overwrite opencv-contrib-python's cv2 and break
+# cv2.ximgproc. Install it separately without dependencies:
+#   python -m pip install --no-deps -r requirements-ocr.txt
+# Its runtime deps are listed below.
+onnxruntime>=1.17.0
+Pillow
+PyYAML
+six
+pyclipper
+Shapely
+tqdm

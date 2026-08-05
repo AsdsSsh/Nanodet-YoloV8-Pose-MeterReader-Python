@@ -1,0 +1,5 @@
+# Install with: python -m pip install --no-deps -r requirements-ocr.txt
+# --no-deps avoids pulling opencv-python, which conflicts with the project's
+# opencv-contrib-python (its deps are listed in requirements.txt instead).
+--no-deps
+rapidocr-onnxruntime==1.4.4

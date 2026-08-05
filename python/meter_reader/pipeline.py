@@ -10,6 +10,7 @@ from .geometry import compensated_value, scale_value
 from .nanodet import NanoDet
 from .ncnn_backend import NcnnBackend
 from .pose import YoloV8Pose
+from .scale_ocr import ScaleOcr
 from .types import Detection, MeterReading
 
 
@@ -31,6 +32,7 @@ class MeterReader:
         )
         self.nanodet = NanoDet(nanodet_backend, config.nanodet)
         self.pose = YoloV8Pose(pose_backend, config.pose, config.pointer)
+        self.ocr = ScaleOcr(config.ocr)
 
     def read(
         self,
@@ -91,16 +93,33 @@ class MeterReader:
                 )
             )
         points = self.pose.points_from_detections(roi, pose_detections)
-        value = scale_value(points, self.config.scale)
+        effective_scale = self.config.scale
+        scale_source = "config"
+        if self.config.ocr.enabled:
+            ocr_scale = self.ocr.read_scale(roi, pose_detections, self.config.scale)
+            if ocr_scale is not None:
+                effective_scale = ocr_scale
+                scale_source = "ocr"
+            if debug:
+                print(
+                    "meter {} ocr debug: {}".format(
+                        index,
+                        json.dumps(self.ocr.last_debug, ensure_ascii=False),
+                    )
+                )
+        value = scale_value(points, effective_scale)
         display_value = compensated_value(
-            value, self.config.scale, apply_compensation
+            value, effective_scale, apply_compensation
         )
         return MeterReading(
             detection,
             value,
             display_value,
-            self.config.scale.unit,
+            effective_scale.unit,
             points,
+            effective_scale.beginning,
+            effective_scale.end,
+            scale_source,
         )
 
     def _padded_crop(
@@ -160,6 +179,38 @@ class MeterReader:
             cv2.circle(output, center, 3, (0, 0, 255), -1)
             cv2.circle(output, pointer, 3, (255, 0, 0), -1)
             cv2.line(output, center, pointer, (255, 255, 0), 1, cv2.LINE_AA)
+
+            # Label the scale range endpoints next to their keypoints.
+            min_text = "min {:.3f}".format(reading.scale_begin)
+            max_text = "max {:.3f}".format(reading.scale_end)
+            min_origin = (
+                max(0, min(start[0] - 10, output.shape[1] - 90)),
+                min(output.shape[0] - 5, start[1] + 25),
+            )
+            max_origin = (
+                max(0, min(end[0] - 80, output.shape[1] - 90)),
+                min(output.shape[0] - 5, end[1] + 25),
+            )
+            cv2.putText(
+                output,
+                min_text,
+                min_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (15, 242, 235),
+                1,
+                cv2.LINE_AA,
+            )
+            cv2.putText(
+                output,
+                max_text,
+                max_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (15, 242, 235),
+                1,
+                cv2.LINE_AA,
+            )
 
             label = "Meter: {:.3f} {}".format(reading.display_value, reading.unit)
             text_y = max(20, y1 - 5)

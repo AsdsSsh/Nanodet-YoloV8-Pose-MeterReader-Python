@@ -51,6 +51,22 @@ class ScaleConfig:
 
 
 @dataclass
+class OcrConfig:
+    enabled: bool = True
+    # Expand the crop around each scale-end box by this fraction of the box
+    # size on every side. Tune when the printed numbers fall outside the box.
+    crop_padding: float = 0.5
+    # Upscale the crop before OCR; small digits on 320-input ROIs benefit.
+    upscale_factor: float = 2.0
+    min_crop_size: int = 16
+    use_cache: bool = True
+    # Cache key quantizes the meter boxes by this many pixels so that camera
+    # jitter does not defeat the cache.
+    cache_quantize: int = 8
+    cache_max_entries: int = 16
+
+
+@dataclass
 class MeterReaderConfig:
     weights_dir: Path
     use_gpu: bool = False
@@ -68,6 +84,7 @@ class MeterReaderConfig:
     pose: PoseConfig = field(default_factory=PoseConfig)
     pointer: PointerConfig = field(default_factory=PointerConfig)
     scale: ScaleConfig = field(default_factory=ScaleConfig)
+    ocr: OcrConfig = field(default_factory=OcrConfig)
 
     @property
     def nanodet_param(self) -> Path:
@@ -102,3 +119,5 @@ class MeterReaderConfig:
             )
         if not 0.0 <= self.roi_padding < 1.0:
             raise ValueError("roi_padding must be in [0, 1)")
+        if not 0.0 <= self.ocr.crop_padding <= 2.0:
+            raise ValueError("ocr.crop_padding must be in [0, 2]")

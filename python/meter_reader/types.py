@@ -40,6 +40,9 @@ class MeterReading:
     display_value: float
     unit: str
     points: MeterPoints
+    scale_begin: float = 0.0
+    scale_end: float = 1.0
+    scale_source: str = "config"  # "config" | "ocr"
 
     def as_dict(self) -> dict:
         return {
@@ -53,6 +56,9 @@ class MeterReading:
             "value": round(self.value, 6),
             "display_value": round(self.display_value, 6),
             "unit": self.unit,
+            "scale_begin": round(self.scale_begin, 6),
+            "scale_end": round(self.scale_end, 6),
+            "scale_source": self.scale_source,
             "points": {
                 "start": list(self.points.start),
                 "end": list(self.points.end),
