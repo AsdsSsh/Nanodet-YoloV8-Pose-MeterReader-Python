@@ -65,14 +65,28 @@ class DecoderTests(unittest.TestCase):
             pointer=(0.0, -1.0),
         )
         self.assertAlmostEqual(angle_ratio(points), 0.5)
-        self.assertAlmostEqual(compensated_value(0.5, ScaleConfig()), 0.512)
+        scale = ScaleConfig(tilt_compensation=0.0)
+        self.assertAlmostEqual(compensated_value(0.5, scale), 0.512)
 
     def test_compensation_scales_with_range(self):
         # 0-25 range: midpoint 12.5, +1.2%*25 = +0.3 below it, +0.8%*25 = +0.2 above.
-        scale = ScaleConfig(end=25.0)
+        scale = ScaleConfig(end=25.0, tilt_compensation=0.0)
         self.assertAlmostEqual(compensated_value(5.0, scale), 5.3)
         self.assertAlmostEqual(compensated_value(12.5, scale), 12.8)
         self.assertAlmostEqual(compensated_value(20.0, scale), 20.2)
+
+    def test_tilt_compensation_curve(self):
+        # 0-10 range, peak magnitude 0.4% of the range: zero at the ends and
+        # the midpoint, subtracts at 1/4 scale, adds back at 3/4 scale.
+        scale = ScaleConfig(end=10.0, tilt_compensation=-0.004)
+        self.assertAlmostEqual(compensated_value(0.0, scale), 0.12)  # ends: no tilt term
+        self.assertAlmostEqual(compensated_value(10.0, scale), 10.08)  # ends: no tilt term
+        self.assertAlmostEqual(compensated_value(5.0, scale), 5.12)  # midpoint: sin(pi)=0
+        self.assertAlmostEqual(compensated_value(2.5, scale), 2.58)  # 1/4: -0.04
+        self.assertAlmostEqual(compensated_value(7.5, scale), 7.62)  # 3/4: +0.04
+        # Positive coefficient flips the direction.
+        scale = ScaleConfig(end=10.0, tilt_compensation=0.004)
+        self.assertAlmostEqual(compensated_value(2.5, scale), 2.66)
 
     def test_compensation_disabled_returns_value(self):
         scale = ScaleConfig(end=25.0)

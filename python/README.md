@@ -19,6 +19,11 @@ The defaults intentionally match the C++ program:
 - Empirical compensation: +1.2% of the scale range at or below the midpoint,
   otherwise +0.8% of the scale range. Proportional to the range so it stays
   consistent when OCR detects a different scale
+- Perspective (tilt) correction: a sinusoidal term over the dial, zero at the
+  range ends and the midpoint, peaking at 1/4 and 3/4 of the range. The
+  default (-0.4% of the range) corrects tilted photos that read slightly
+  high; set 'tilt_compensation' to 0.0 to disable or to +0.004 to flip the
+  direction
 - ROI aspect-ratio filter: disabled by default. The C++ threshold of 0.90 was
   too restrictive for common photographed gauges.
 

@@ -204,6 +204,7 @@ class ScaleOcr:
             compensation_split=fallback.compensation_split,
             lower_compensation=fallback.lower_compensation,
             upper_compensation=fallback.upper_compensation,
+            tilt_compensation=fallback.tilt_compensation,
         )
 
     def read_scale(

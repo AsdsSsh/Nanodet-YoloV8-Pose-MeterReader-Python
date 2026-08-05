@@ -41,5 +41,16 @@ def compensated_value(value: float, config: ScaleConfig, enabled: bool = True) -
     # range, so they stay consistent for any (possibly OCR-detected) range.
     split = config.beginning + config.compensation_split * range_size
     if value <= split:
-        return value + config.lower_compensation * range_size
-    return value + config.upper_compensation * range_size
+        compensated = value + config.lower_compensation * range_size
+    else:
+        compensated = value + config.upper_compensation * range_size
+    # Perspective (tilt) correction: sinusoidal over the dial, zero at the
+    # range ends and the midpoint, peaking at 1/4 and 3/4 of the range.
+    # The sign depends on the tilt direction; the default is tuned for
+    # photos that read slightly high.
+    if config.tilt_compensation != 0.0:
+        ratio = (value - config.beginning) / range_size
+        compensated += (
+            config.tilt_compensation * range_size * math.sin(2.0 * math.pi * ratio)
+        )
+    return compensated

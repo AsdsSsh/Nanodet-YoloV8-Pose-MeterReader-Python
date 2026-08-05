@@ -52,6 +52,13 @@ class ScaleConfig:
     compensation_split: float = 0.5
     lower_compensation: float = 0.012
     upper_compensation: float = 0.008
+    # Perspective (tilt) correction: a sinusoidal term over the dial that is
+    # zero at the range ends and the midpoint, peaking at 1/4 and 3/4 of the
+    # range. A tilted photo distorts dial angles exactly like this. Value is
+    # the peak magnitude as a fraction of the range; negative subtracts
+    # (corrects readings that come out slightly high on tilted photos).
+    # Set to 0.0 to disable.
+    tilt_compensation: float = -0.004
 
 
 @dataclass
