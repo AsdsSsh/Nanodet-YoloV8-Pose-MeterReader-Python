@@ -16,7 +16,9 @@ The defaults intentionally match the C++ program:
 - NanoDet input: 320 x 320, score threshold 0.3, NMS threshold 0.3
 - YOLOv8-Pose input long side: 320, score threshold 0.25, NMS threshold 0.45
 - Scale range: 0.0 to 1.0 MPa
-- Empirical compensation: +0.012 MPa at or below 0.5, otherwise +0.008 MPa
+- Empirical compensation: +1.2% of the scale range at or below the midpoint,
+  otherwise +0.8% of the scale range. Proportional to the range so it stays
+  consistent when OCR detects a different scale
 - ROI aspect-ratio filter: disabled by default. The C++ threshold of 0.90 was
   too restrictive for common photographed gauges.
 

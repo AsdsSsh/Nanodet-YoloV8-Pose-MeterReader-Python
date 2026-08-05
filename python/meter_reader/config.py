@@ -45,6 +45,10 @@ class ScaleConfig:
     beginning: float = 0.0
     end: float = 1.0
     unit: str = "MPa"
+    # Fraction of the scale range (end - beginning) below which the lower
+    # compensation applies. The compensation amounts below are also fractions
+    # of the range, so they stay consistent for any (possibly OCR-detected)
+    # range. Defaults equal +1.2% / +0.8% of the range.
     compensation_split: float = 0.5
     lower_compensation: float = 0.012
     upper_compensation: float = 0.008

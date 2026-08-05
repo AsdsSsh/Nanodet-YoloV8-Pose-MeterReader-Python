@@ -34,6 +34,12 @@ def scale_value(points: MeterPoints, config: ScaleConfig) -> float:
 def compensated_value(value: float, config: ScaleConfig, enabled: bool = True) -> float:
     if not enabled:
         return value
-    if value <= config.compensation_split:
-        return value + config.lower_compensation
-    return value + config.upper_compensation
+    range_size = config.end - config.beginning
+    if range_size <= 0.0:
+        return value
+    # The split and the compensation amounts are fractions of the scale
+    # range, so they stay consistent for any (possibly OCR-detected) range.
+    split = config.beginning + config.compensation_split * range_size
+    if value <= split:
+        return value + config.lower_compensation * range_size
+    return value + config.upper_compensation * range_size

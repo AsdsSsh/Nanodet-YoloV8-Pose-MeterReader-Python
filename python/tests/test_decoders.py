@@ -67,6 +67,21 @@ class DecoderTests(unittest.TestCase):
         self.assertAlmostEqual(angle_ratio(points), 0.5)
         self.assertAlmostEqual(compensated_value(0.5, ScaleConfig()), 0.512)
 
+    def test_compensation_scales_with_range(self):
+        # 0-25 range: midpoint 12.5, +1.2%*25 = +0.3 below it, +0.8%*25 = +0.2 above.
+        scale = ScaleConfig(end=25.0)
+        self.assertAlmostEqual(compensated_value(5.0, scale), 5.3)
+        self.assertAlmostEqual(compensated_value(12.5, scale), 12.8)
+        self.assertAlmostEqual(compensated_value(20.0, scale), 20.2)
+
+    def test_compensation_disabled_returns_value(self):
+        scale = ScaleConfig(end=25.0)
+        self.assertAlmostEqual(compensated_value(5.0, scale, enabled=False), 5.0)
+
+    def test_compensation_zero_range_returns_value(self):
+        scale = ScaleConfig(beginning=1.0, end=1.0)
+        self.assertAlmostEqual(compensated_value(1.0, scale), 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
