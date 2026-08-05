@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 
 from .config import NanoDetConfig
-from .image_utils import letterbox_black, nms
+from .image_utils import letterbox_black, merge_duplicates, nms
 from .ncnn_backend import NcnnBackend
 from .types import Detection
 
@@ -73,7 +73,10 @@ class NanoDet:
             x2 = min(center_x + distances[2], float(input_width))
             y2 = min(center_y + distances[3], float(input_height))
             results.append(Detection(x1, y1, x2 - x1, y2 - y1, score, label))
-        return nms(results, self.config.nms_threshold, inclusive=True)
+        return merge_duplicates(
+            nms(results, self.config.nms_threshold, inclusive=True),
+            self.config.merge_threshold,
+        )
 
     def detect(self, image: np.ndarray) -> List[Detection]:
         resized, effect = letterbox_black(image, self.config.input_size[0])

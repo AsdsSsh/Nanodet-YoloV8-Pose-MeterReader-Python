@@ -97,5 +97,45 @@ class DecoderTests(unittest.TestCase):
         self.assertAlmostEqual(compensated_value(1.0, scale), 1.0)
 
 
+class MergeDuplicatesTests(unittest.TestCase):
+    def test_merges_overlapping_boxes_into_union(self):
+        from meter_reader.image_utils import merge_duplicates
+        from meter_reader.types import Detection
+
+        left = Detection(0.0, 0.0, 100.0, 100.0, 0.4, 0)
+        right = Detection(50.0, 10.0, 100.0, 80.0, 0.9, 0)
+        merged = merge_duplicates([left, right], 0.25)
+        self.assertEqual(len(merged), 1)
+        box = merged[0]
+        self.assertAlmostEqual(box.x, 0.0)
+        self.assertAlmostEqual(box.y, 0.0)
+        self.assertAlmostEqual(box.width, 150.0)
+        self.assertAlmostEqual(box.height, 100.0)
+        self.assertAlmostEqual(box.score, 0.9)  # highest score kept
+
+    def test_keeps_disjoint_boxes(self):
+        from meter_reader.image_utils import merge_duplicates
+        from meter_reader.types import Detection
+
+        boxes = [
+            Detection(0.0, 0.0, 100.0, 100.0, 0.9, 0),
+            Detection(300.0, 0.0, 100.0, 100.0, 0.8, 0),
+        ]
+        merged = merge_duplicates(boxes, 0.25)
+        self.assertEqual(len(merged), 2)
+
+    def test_threshold_below_overlap_keeps_both(self):
+        from meter_reader.image_utils import merge_duplicates
+        from meter_reader.types import Detection
+
+        # IoU 0.2 < 0.25 threshold
+        boxes = [
+            Detection(0.0, 0.0, 100.0, 100.0, 0.9, 0),
+            Detection(80.0, 0.0, 100.0, 100.0, 0.8, 0),
+        ]
+        merged = merge_duplicates(boxes, 0.25)
+        self.assertEqual(len(merged), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

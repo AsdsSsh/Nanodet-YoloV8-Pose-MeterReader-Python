@@ -253,5 +253,178 @@ class ReadScaleTests(unittest.TestCase):
         self.assertIn("OCR", str(caught[0].message))
 
 
+class ReadScaleEndsTests(unittest.TestCase):
+    """Tests for the whole-dial OCR fallback (read_scale_ends). The dial is
+    synthetic: center (100, 100), numbers at radius 60, arc over the top from
+    the min (left, math-frame angle 180 deg) to the max (right, 0 deg)."""
+
+    CENTER = (100.0, 100.0)
+
+    def _config(self, **overrides):
+        return OcrConfig(upscale_factor=1.0, **overrides)
+
+    def _box_at(self, x, y):
+        return np.array(
+            [[x - 5, y - 5], [x + 5, y - 5], [x + 5, y + 5], [x - 5, y + 5]],
+            dtype=np.float32,
+        )
+
+    def _token(self, text, angle_degrees, score=0.99, center=(100.0, 100.0)):
+        x = center[0] + 60.0 * np.cos(np.radians(angle_degrees))
+        y = center[1] - 60.0 * np.sin(np.radians(angle_degrees))
+        return [self._box_at(x, y), text, score]
+
+    def _read(self, results, config=None, center=None, pointer=(100.0, 40.0)):
+        ocr = ScaleOcr(config or self._config())
+        engine = FakeEngine([results])
+        ocr.set_engine(engine)
+        scale = ocr.read_scale_ends(
+            _roi(), center or self.CENTER, pointer, ScaleConfig(unit="MPa")
+        )
+        return engine, scale
+
+    def test_reads_range_and_interpolates_pointer(self):
+        _, result = self._read(
+            [
+                self._token("0", 180),
+                self._token("20", 144),
+                self._token("40", 108),
+                self._token("60", 72),
+                self._token("80", 36),
+                self._token("100", 0),
+            ]
+        )
+        self.assertIsNotNone(result)
+        start, end, scale, value = result
+        self.assertAlmostEqual(start[0], 40.0, places=1)
+        self.assertAlmostEqual(end[0], 160.0, places=1)
+        self.assertAlmostEqual(scale.beginning, 0.0)
+        self.assertAlmostEqual(scale.end, 100.0)
+        self.assertAlmostEqual(value, 50.0, places=6)
+
+    def test_piecewise_interpolation_handles_uneven_spacing(self):
+        # The 60 is shifted toward the 40 (81 deg instead of 72), so the
+        # straight arc ratio would read 50 but the local segment reads 53.3.
+        _, result = self._read(
+            [
+                self._token("0", 180),
+                self._token("20", 144),
+                self._token("40", 108),
+                self._token("60", 81),
+                self._token("80", 36),
+                self._token("100", 0),
+            ]
+        )
+        self.assertIsNotNone(result)
+        _start, _end, _scale, value = result
+        self.assertAlmostEqual(value, 53.333, places=3)
+
+    def test_rejects_low_confidence_tokens(self):
+        engine, result = self._read(
+            [
+                self._token("0", 180),
+                self._token("100", 0, score=0.5),
+                self._token("99", 36, score=0.6),
+            ]
+        )
+        # Only "0" survives the confidence floor; one token is not enough.
+        self.assertIsNone(result)
+        self.assertEqual(engine.calls, 1)
+
+    def test_ignores_serial_number_tokens(self):
+        _, result = self._read(
+            [
+                self._token("0", 180),
+                self._token("100", 0),
+                [self._box_at(100.0, 160.0), "80723048", 0.99],
+            ]
+        )
+        self.assertIsNotNone(result)
+        start, end, scale, value = result
+        self.assertAlmostEqual(scale.end, 100.0)
+        self.assertAlmostEqual(end[1], 100.0, places=1)
+
+    def test_ccw_gauge_direction(self):
+        # Mirrored dial: min at the right (0 deg), max at the left (180 deg).
+        _, result = self._read(
+            [
+                self._token("0", 0),
+                self._token("50", 90),
+                self._token("100", 180),
+            ],
+            pointer=(100.0, 40.0),
+        )
+        self.assertIsNotNone(result)
+        _start, _end, _scale, value = result
+        self.assertAlmostEqual(value, 50.0, places=6)
+
+    def test_full_circle_dial(self):
+        # Dial indicator: numbers 10-90 around a full circle, the 0/100 gap
+        # at the top of the dial. The top heuristic alone would pick the
+        # short (wrong) arc; the intermediate numbers must vote for the long
+        # arc, and the empty top gap must be inferred as the 0/100 position.
+        center = (186.0, 188.0)
+        _, result = self._read(
+            [
+                self._token("10", 55, center=center),
+                self._token("20", 17, center=center),
+                self._token("30", -18, center=center),
+                self._token("40", -51, center=center),
+                self._token("50", -87, center=center),
+                self._token("60", -121, center=center),
+                self._token("70", -154, center=center),
+                self._token("80", 173, center=center),
+                self._token("90", 130, center=center),
+            ],
+            pointer=(143.6, 230.4),  # math-frame angle -135: between 60 and 70
+            center=center,
+        )
+        self.assertIsNotNone(result)
+        start, end, scale, value = result
+        # The 0/100 gap at the top is inferred, so the scale is 0-100.
+        self.assertAlmostEqual(scale.beginning, 0.0)
+        self.assertAlmostEqual(scale.end, 100.0)
+        self.assertGreater(value, 60.0)
+        self.assertLess(value, 70.0)
+        # Both scale ends sit at the gap midpoint (the top of the dial).
+        self.assertAlmostEqual(start[0], end[0], places=6)
+        self.assertAlmostEqual(start[1], end[1], places=6)
+
+    def test_center_label_tokens_filtered(self):
+        # "0.01mm" and "0-50um" labels near the pivot parse as numbers; they
+        # must not become scale ends.
+        _, result = self._read(
+            [
+                self._token("0", 180),
+                self._token("50", 90),
+                self._token("100", 0),
+                [self._box_at(100.0, 145.0), "0.01", 0.99],
+                [self._box_at(100.0, 155.0), "0", 0.99],
+            ],
+            pointer=(100.0, 40.0),
+        )
+        self.assertIsNotNone(result)
+        _start, _end, scale, _value = result
+        self.assertAlmostEqual(scale.beginning, 0.0)
+        self.assertAlmostEqual(scale.end, 100.0)
+
+    def test_degenerate_range_returns_none(self):
+        _, result = self._read(
+            [self._token("100", 0), self._token("100", 180)]
+        )
+        self.assertIsNone(result)
+
+    def test_disabled_returns_none(self):
+        ocr = ScaleOcr(OcrConfig(enabled=False))
+        engine = FakeEngine([])
+        ocr.set_engine(engine)
+        self.assertIsNone(
+            ocr.read_scale_ends(
+                _roi(), self.CENTER, (100.0, 40.0), ScaleConfig()
+            )
+        )
+        self.assertEqual(engine.calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,11 @@ class NanoDetConfig:
     input_size: Tuple[int, int] = (320, 320)
     score_threshold: float = 0.3
     nms_threshold: float = 0.3
+    # Post-NMS: merge detections overlapping by at least this IoU into their
+    # bounding union. NMS alone cannot deduplicate two partial boxes of the
+    # same meter (IoU below its threshold), e.g. when a dial fills the frame
+    # and two anchor scales each cover half of it.
+    merge_threshold: float = 0.25
     num_classes: int = 1
     reg_max: int = 7
     strides: Tuple[int, ...] = (8, 16, 32, 64)
@@ -30,6 +35,11 @@ class PoseConfig:
     input_name: str = "images"
     output_names: Tuple[str, str, str] = ("output0", "378", "403")
     output_strides: Tuple[int, int, int] = (8, 16, 32)
+    # Minimum angular separation between the two scale-end keypoints around
+    # the dial center. A real dial arc spans well over 90 degrees; a smaller
+    # separation means the model labelled the same end twice (seen on
+    # unusual gauge layouts) and the reading is meaningless.
+    min_arc_degrees: float = 30.0
 
 
 @dataclass

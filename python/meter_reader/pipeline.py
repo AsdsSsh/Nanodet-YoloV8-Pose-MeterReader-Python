@@ -5,13 +5,14 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from .config import MeterReaderConfig
+from .config import MeterReaderConfig, ScaleConfig
 from .geometry import compensated_value, scale_value
+from .image_utils import find_dial_pointer
 from .nanodet import NanoDet
 from .ncnn_backend import NcnnBackend
 from .pose import YoloV8Pose
 from .scale_ocr import ScaleOcr
-from .types import Detection, MeterReading
+from .types import Detection, MeterPoints, MeterReading
 
 
 class MeterReader:
@@ -60,7 +61,9 @@ class MeterReader:
             except (RuntimeError, ValueError) as exc:
                 # The detector box can cut off part of the dial, e.g. one scale
                 # endpoint that the pose model needs. Retry on a padded crop
-                # that shows the full dial before giving up.
+                # that shows the full dial before giving up. The OCR fallback
+                # is only allowed on this retry: the tight crop is still the
+                # more reliable read when it works.
                 padded = self._padded_crop(image, detection)
                 if padded is None:
                     warnings.warn("Failed to read meter {}: {}".format(index, exc))
@@ -68,7 +71,12 @@ class MeterReader:
                 padded_roi, padded_detection = padded
                 try:
                     reading = self._read_roi(
-                        padded_roi, padded_detection, apply_compensation, debug, index
+                        padded_roi,
+                        padded_detection,
+                        apply_compensation,
+                        debug,
+                        index,
+                        allow_ocr_fallback=True,
                     )
                 except (RuntimeError, ValueError):
                     warnings.warn("Failed to read meter {}: {}".format(index, exc))
@@ -83,6 +91,7 @@ class MeterReader:
         apply_compensation: bool,
         debug: bool,
         index: int,
+        allow_ocr_fallback: bool = False,
     ) -> MeterReading:
         pose_detections = self.pose.detect(roi)
         if debug:
@@ -92,22 +101,36 @@ class MeterReader:
                     json.dumps(self.pose.last_debug, ensure_ascii=False),
                 )
             )
-        points = self.pose.points_from_detections(roi, pose_detections)
-        effective_scale = self.config.scale
-        scale_source = "config"
-        if self.config.ocr.enabled:
-            ocr_scale = self.ocr.read_scale(roi, pose_detections, self.config.scale)
-            if ocr_scale is not None:
-                effective_scale = ocr_scale
-                scale_source = "ocr"
-            if debug:
-                print(
-                    "meter {} ocr debug: {}".format(
-                        index,
-                        json.dumps(self.ocr.last_debug, ensure_ascii=False),
-                    )
+        try:
+            points = self.pose.points_from_detections(roi, pose_detections)
+            effective_scale = self.config.scale
+            scale_source = "config"
+            if self.config.ocr.enabled:
+                ocr_scale = self.ocr.read_scale(
+                    roi, pose_detections, self.config.scale
                 )
-        value = scale_value(points, effective_scale)
+                if ocr_scale is not None:
+                    effective_scale = ocr_scale
+                    scale_source = "ocr"
+                if debug:
+                    print(
+                        "meter {} ocr debug: {}".format(
+                            index,
+                            json.dumps(self.ocr.last_debug, ensure_ascii=False),
+                        )
+                    )
+            value = scale_value(points, effective_scale)
+        except (RuntimeError, ValueError):
+            if not allow_ocr_fallback:
+                raise
+            # The pose model cannot find all three keypoint classes on some
+            # gauge layouts (e.g. the min printed at the left instead of the
+            # bottom-left). As a last resort, locate the scale ends from the
+            # OCR'd dial numbers and interpolate the pointer directly.
+            points, effective_scale, value = self._points_from_ocr(
+                roi, pose_detections, debug, index
+            )
+            scale_source = "ocr"
         display_value = compensated_value(
             value, effective_scale, apply_compensation
         )
@@ -121,6 +144,48 @@ class MeterReader:
             effective_scale.end,
             scale_source,
         )
+
+    def _points_from_ocr(
+        self,
+        roi: np.ndarray,
+        pose_detections: List,
+        debug: bool,
+        index: int,
+    ) -> Tuple[MeterPoints, ScaleConfig, float]:
+        """OCR-based fallback used when the pose model cannot find all three
+        keypoint classes: use the OCR'd min/max dial numbers as the scale
+        ends and interpolate the pointer angle between them. Raises when the
+        pointer is missing or the scale cannot be read."""
+        if not self.config.ocr.enabled:
+            raise ValueError(
+                "Pose model did not find pointer, left endpoint, and right "
+                "endpoint, and OCR scale detection is disabled"
+            )
+        pointer_points = self.pose.pointer_points(roi, pose_detections)
+        if pointer_points is None:
+            # The pose model cannot find the pointer either (e.g. full-circle
+            # dial indicators). Locate the needle by image processing.
+            needle = find_dial_pointer(roi)
+            if needle is None:
+                raise ValueError(
+                    "Pose model did not find pointer, left endpoint, and right "
+                    "endpoint, and the needle could not be located on the dial"
+                )
+            center, pointer, _line = needle
+        else:
+            center, pointer, _line = pointer_points
+        result = self.ocr.read_scale_ends(roi, center, pointer, self.config.scale)
+        if result is None:
+            raise ValueError("Could not locate the scale ends on the dial")
+        start, end, scale, value = result
+        if debug:
+            print(
+                "meter {} ocr fallback debug: {}".format(
+                    index,
+                    json.dumps(self.ocr.last_debug, ensure_ascii=False),
+                )
+            )
+        return MeterPoints(start, end, center, pointer), scale, value
 
     def _padded_crop(
         self, image: np.ndarray, detection: Detection

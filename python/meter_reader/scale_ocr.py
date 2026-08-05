@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from .config import OcrConfig, ScaleConfig
-from .types import PoseDetection
+from .types import Point, PoseDetection
 
 _NUMBER_PATTERN = re.compile(r"[-+]?(?:\d+(?:[.,]\d*)?|[.,]\d+)")
 
@@ -103,8 +103,9 @@ class ScaleOcr:
         return self._engine
 
     @staticmethod
-    def _normalize_output(output) -> List[Tuple[str, Optional[float]]]:
-        """Normalize the engine return value to a list of (text, score) pairs.
+    def _normalize_output(output) -> List[Tuple[str, Optional[float], float, float]]:
+        """Normalize the engine return value to a list of
+        (text, score, center_x, center_y) entries in image coordinates.
         Handles both the v1 style (([box, txt, score], elapse) or None) and
         the newer rapidocr package style (an object with .txts/.scores)."""
         if isinstance(output, tuple) and len(output) == 2:
@@ -113,13 +114,31 @@ class ScaleOcr:
             result = output
         if result is None:
             return []
+        def _box_center(box):
+            try:
+                points = np.asarray(box, dtype=np.float32).reshape(-1, 2)
+                return float(points[:, 0].mean()), float(points[:, 1].mean())
+            except (TypeError, ValueError):
+                return 0.0, 0.0
+
         if hasattr(result, "txts"):
             texts = list(result.txts)
             scores = list(result.scores)
-            return [
-                (str(text), float(score) if score is not None else None)
-                for text, score in zip(texts, scores)
-            ]
+            boxes = getattr(result, "boxes", None)
+            items = []
+            for index, text in enumerate(texts):
+                score = scores[index] if index < len(scores) else None
+                box = boxes[index] if boxes is not None and index < len(boxes) else None
+                center_x, center_y = _box_center(box)
+                items.append(
+                    (
+                        str(text),
+                        float(score) if score is not None else None,
+                        center_x,
+                        center_y,
+                    )
+                )
+            return items
         items = []
         for entry in result:
             if len(entry) < 3:
@@ -127,7 +146,15 @@ class ScaleOcr:
             text, score = entry[1], entry[2]
             if not isinstance(text, str):
                 continue
-            items.append((text, float(score) if score is not None else None))
+            center_x, center_y = _box_center(entry[0])
+            items.append(
+                (
+                    text,
+                    float(score) if score is not None else None,
+                    center_x,
+                    center_y,
+                )
+            )
         return items
 
     def _ocr_items(self, crop: np.ndarray) -> List[Tuple[str, Optional[float]]]:
@@ -135,6 +162,13 @@ class ScaleOcr:
         upscaled resolution too. Results are merged and the caller picks the
         most confident number, so a misread caused by upscaling cannot win
         over a correct native read."""
+        return [(text, score) for text, score, _x, _y in self._ocr_items_with_boxes(crop)]
+
+    def _ocr_items_with_boxes(
+        self, crop: np.ndarray
+    ) -> List[Tuple[str, Optional[float], float, float]]:
+        """Like _ocr_items but also reports each text's center position in
+        the (un-upscaled) crop."""
         engine = self._ensure_engine()
         items = self._normalize_output(engine(crop))
         upscale = self.config.upscale_factor
@@ -142,7 +176,10 @@ class ScaleOcr:
             upscaled = cv2.resize(
                 crop, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC
             )
-            items.extend(self._normalize_output(engine(upscaled)))
+            items.extend(
+                (text, score, x / upscale, y / upscale)
+                for text, score, x, y in self._normalize_output(engine(upscaled))
+            )
         return items
 
     @staticmethod
@@ -265,3 +302,217 @@ class ScaleOcr:
             while len(self._cache) > self.config.cache_max_entries:
                 self._cache.popitem(last=False)
         return self._build_scale(beginning, end, fallback)
+
+    # Confidence floor for whole-dial OCR tokens used as scale ends. Low
+    # scores are usually misreads (e.g. "2司" for "2"), and a wrong end
+    # position is worse than falling back to the static config range.
+    _MIN_END_SCORE = 0.8
+    # A real dial arc spans roughly 90-270 degrees; anything outside is a
+    # degenerate token pair (e.g. a bezel number next to a scale number).
+    _MIN_ARC = math.pi / 3.0
+    _MAX_ARC = 5.0 * math.pi / 3.0
+
+    def read_scale_ends(
+        self,
+        roi: np.ndarray,
+        center: Point,
+        pointer: Point,
+        fallback: ScaleConfig,
+    ) -> Optional[Tuple[Point, Point, ScaleConfig, float]]:
+        """Fallback for gauge layouts the pose model cannot recognize (e.g.
+        the min number printed at the left instead of the bottom-left, so
+        the max scale-end box is never detected): OCR the whole dial face,
+        take the lowest and highest numbers as the scale ends, and
+        interpolate the pointer angle between them directly.
+
+        Returns (start, end, scale, value): the image positions of the min
+        and max numbers, the value range they define, and the interpolated
+        reading. None when the scale cannot be read reliably."""
+        self.last_debug = {}
+        if not self.config.enabled:
+            return None
+        try:
+            items = self._ocr_items_with_boxes(roi)
+        except (ImportError, RuntimeError, ValueError) as exc:
+            if not self._engine_failed:
+                self._engine_failed = True
+                warnings.warn("OCR scale detection unavailable: {}".format(exc))
+            return None
+        tokens = []
+        for text, score, x, y in items:
+            if score is None or score < self._MIN_END_SCORE:
+                continue
+            number = parse_number(text)
+            if number is None or not math.isfinite(number):
+                continue
+            tokens.append((number, float(x), float(y), float(score)))
+        # Native and upscaled reads report the same numbers twice; keep the
+        # most confident instance of each value.
+        tokens = sorted(
+            tokens, key=lambda item: item[3], reverse=True
+        )
+        unique: "List[Tuple[float, float, float]]" = []
+        seen_values = set()
+        for number, x, y, score in tokens:
+            if number in seen_values:
+                continue
+            seen_values.add(number)
+            unique.append((number, x, y))
+        tokens = unique
+        # The dial face can carry serial numbers (e.g. "80723048") alongside
+        # the scale numbers; drop tokens that are orders of magnitude larger
+        # than the typical scale number. The median is a stable "typical"
+        # magnitude even when a serial is present.
+        if len(tokens) >= 3:
+            median = sorted(token[0] for token in tokens)[len(tokens) // 2]
+            magnitude_limit = 100.0 * max(1.0, abs(median))
+            tokens = [
+                token for token in tokens if abs(token[0]) <= magnitude_limit
+            ]
+        # Scale numbers sit on the number ring around the dial; center
+        # labels (e.g. "0.01mm" on a dial indicator) parse as numbers too
+        # but sit close to the pivot. Drop tokens much closer to the center
+        # than the typical number, or they can win the min/max selection
+        # and wreck the angle baseline.
+        if len(tokens) >= 3:
+            center_x0, center_y0 = center
+            distances = sorted(
+                math.hypot(token[1] - center_x0, token[2] - center_y0)
+                for token in tokens
+            )
+            ring_distance = distances[len(distances) // 2]
+            tokens = [
+                token
+                for token in tokens
+                if math.hypot(token[1] - center_x0, token[2] - center_y0)
+                >= 0.6 * ring_distance
+            ]
+        self.last_debug["tokens"] = tokens
+        if len(tokens) < 2:
+            return None
+        minimum = min(tokens, key=lambda item: item[0])
+        maximum = max(tokens, key=lambda item: item[0])
+        if minimum[0] >= maximum[0]:
+            return None
+
+        center_x, center_y = center
+        start_angle = math.atan2(center_y - minimum[2], minimum[1] - center_x)
+        end_angle = math.atan2(center_y - maximum[2], maximum[1] - center_x)
+        pointer_angle = math.atan2(center_y - pointer[1], pointer[0] - center_x)
+        sweep_cw = (start_angle - end_angle) % (2.0 * math.pi)
+        sweep_ccw = (end_angle - start_angle) % (2.0 * math.pi)
+        # The scale runs from the min number to the max number; the other
+        # numbers on the dial all lie on that arc, so let them vote for the
+        # direction. The "over the top" heuristic below only kicks in when
+        # there are no intermediate numbers (min/max adjacent), e.g. on a
+        # full-circle dial whose 0/100 gap is at the top the +90 degree
+        # direction falls inside the gap, so the top heuristic alone picks
+        # the wrong (short) arc.
+        cw_count = sum(
+            1
+            for token in tokens
+            if minimum[0] < token[0] < maximum[0]
+            and (start_angle - math.atan2(center_y - token[2], token[1] - center_x))
+            % (2.0 * math.pi) < sweep_cw
+        )
+        ccw_count = sum(
+            1 for token in tokens if minimum[0] < token[0] < maximum[0]
+        ) - cw_count
+        if cw_count != ccw_count:
+            direction = 1 if cw_count > ccw_count else -1
+        else:
+            top_cw = (start_angle - math.pi / 2.0) % (2.0 * math.pi)
+            top_ccw = (math.pi / 2.0 - start_angle) % (2.0 * math.pi)
+            if top_cw < sweep_cw:
+                direction = 1  # clockwise (in the atan2 frame)
+            elif top_ccw < sweep_ccw:
+                direction = -1  # counter-clockwise
+            else:
+                return None
+        if not self._MIN_ARC <= (sweep_cw if direction > 0 else sweep_ccw) <= self._MAX_ARC:
+            return None
+
+        def sweep_of(angle: float) -> float:
+            if direction > 0:
+                return (start_angle - angle) % (2.0 * math.pi)
+            return (angle - start_angle) % (2.0 * math.pi)
+
+        pointer_sweep = sweep_of(pointer_angle)
+        # Full-circle dials (e.g. dial indicators): the numbers 10..90 span
+        # nearly the whole circle and the missing 0/100 sit together in the
+        # small gap at the top of the dial. Detect that gap (short AND
+        # containing the +90 degree direction) and infer the two end
+        # numbers at its midpoint instead of treating the min/max numbers
+        # as the scale ends. Half-circle gauges (0 at the bottom-left) have
+        # their gap at the bottom, so they are not affected.
+        sweep = sweep_cw if direction > 0 else sweep_ccw
+        gap = (2.0 * math.pi) - sweep
+        end_angle = math.atan2(center_y - maximum[2], maximum[1] - center_x)
+        if direction > 0:
+            top_in_gap = (end_angle - math.pi / 2.0) % (2.0 * math.pi) < gap
+        else:
+            top_in_gap = (math.pi / 2.0 - end_angle) % (2.0 * math.pi) < gap
+        if gap < 2.0 * math.pi / 3.0 and top_in_gap:
+            step = (maximum[0] - minimum[0]) / max(len(tokens) - 1, 1)
+            full_min = minimum[0] - step
+            full_max = maximum[0] + step
+            gap_mid_sweep = (sweep + gap / 2.0) % (2.0 * math.pi)
+            ratio = (pointer_sweep - gap_mid_sweep) % (2.0 * math.pi) / (
+                2.0 * math.pi
+            )
+            value = full_min + ratio * (full_max - full_min)
+            gap_mid_angle = end_angle - gap / 2.0 if direction > 0 else end_angle + gap / 2.0
+            ring_radius = max(
+                math.hypot(token[1] - center_x, token[2] - center_y)
+                for token in tokens
+            )
+            gap_mid_point = (
+                center_x + ring_radius * math.cos(gap_mid_angle),
+                center_y - ring_radius * math.sin(gap_mid_angle),
+            )
+            scale = self._build_scale(full_min, full_max, fallback)
+            self.last_debug["scale_ends"] = {
+                "start": [gap_mid_point[0], gap_mid_point[1]],
+                "end": [gap_mid_point[0], gap_mid_point[1]],
+                "value": value,
+                "full_circle": True,
+            }
+            return gap_mid_point, gap_mid_point, scale, value
+        # Dial numbers are rarely evenly spaced (steps shrink toward the
+        # middle of the arc), so interpolate within the segment between the
+        # two numbers flanking the pointer; fall back to a straight ratio
+        # over the whole arc when the pointer is not between two numbers.
+        ordered = sorted(tokens, key=lambda item: sweep_of(
+            math.atan2(center_y - item[2], item[1] - center_x)
+        ))
+        chain = []
+        for number, x, y in ordered:
+            if not chain or number > chain[-1][0]:
+                chain.append((number, x, y))
+        value = None
+        if chain[0][0] == minimum[0] and chain[-1][0] == maximum[0]:
+            for index in range(len(chain) - 1):
+                lower, upper = chain[index], chain[index + 1]
+                lower_sweep = sweep_of(
+                    math.atan2(center_y - lower[2], lower[1] - center_x)
+                )
+                upper_sweep = sweep_of(
+                    math.atan2(center_y - upper[2], upper[1] - center_x)
+                )
+                if lower_sweep <= pointer_sweep <= upper_sweep:
+                    fraction = (pointer_sweep - lower_sweep) / (
+                        upper_sweep - lower_sweep
+                    )
+                    value = lower[0] + fraction * (upper[0] - lower[0])
+                    break
+        if value is None:
+            ratio = min(1.0, max(0.0, pointer_sweep / sweep))
+            value = minimum[0] + ratio * (maximum[0] - minimum[0])
+
+        scale = self._build_scale(minimum[0], maximum[0], fallback)
+        self.last_debug["scale_ends"] = {
+            "start": [minimum[1], minimum[2]],
+            "end": [maximum[1], maximum[2]],
+            "value": value,
+        }
+        return (minimum[1], minimum[2]), (maximum[1], maximum[2]), scale, value

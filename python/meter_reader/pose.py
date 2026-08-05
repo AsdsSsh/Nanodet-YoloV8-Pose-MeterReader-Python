@@ -113,7 +113,18 @@ class YoloV8Pose:
         for output, stride in zip(outputs, self.config.output_strides):
             output_shapes.append(tuple(np.asarray(output).shape))
             proposals.extend(self._decode_output(output, stride))
-        selected = nms(proposals, self.config.nms_threshold)
+        # Standard YOLOv8 NMS is per class. Class-agnostic NMS wrongly
+        # suppresses a lower-scoring scale-end box when it overlaps the
+        # (larger) pointer box or the other scale-end box, e.g. when the
+        # pointer points at a scale end.
+        selected = []
+        for label in range(self.config.num_classes):
+            selected.extend(
+                nms(
+                    [item for item in proposals if item.label == label],
+                    self.config.nms_threshold,
+                )
+            )
         self.last_debug = {
             "input_shape": tuple(image.shape),
             "output_shapes": output_shapes,
@@ -250,6 +261,27 @@ class YoloV8Pose:
                         image[y, x] = 0
         return image * 255
 
+    def pointer_points(
+        self, image: np.ndarray, detections: Iterable[PoseDetection]
+    ) -> Optional[Tuple[Point, Point, Optional[Tuple[int, int, int, int]]]]:
+        """Extract (center, pointer, pointer_line) from the best pointer
+        detection, refining the tip with the Hough line when available.
+        Returns None when no usable pointer detection exists."""
+        best = None
+        for detection in detections:
+            if detection.label == 0 and (
+                best is None or detection.score > best.score
+            ):
+                best = detection
+        if best is None:
+            return None
+        center = self._keypoint(best, 0)
+        pointer = self._keypoint(best, 1)
+        line = self.pointer_line(image, best)
+        if line is not None:
+            pointer = self._far_endpoint(center, line)
+        return center, pointer, line
+
     def points_from_detections(
         self, image: np.ndarray, detections: Iterable[PoseDetection]
     ) -> MeterPoints:
@@ -262,14 +294,24 @@ class YoloV8Pose:
                 "Pose model did not find pointer, left endpoint, and right endpoint"
             )
 
-        pointer_detection = by_label[0]
-        center = self._keypoint(pointer_detection, 0)
-        pointer = self._keypoint(pointer_detection, 1)
+        center, pointer, line = self.pointer_points(image, detections)
         start = self._last_valid_keypoint(by_label[1])
         end = self._last_valid_keypoint(by_label[2])
-        line = self.pointer_line(image, pointer_detection)
-        if line is not None:
-            pointer = self._far_endpoint(center, line)
+        start_angle = math.atan2(center[1] - start[1], start[0] - center[0])
+        end_angle = math.atan2(center[1] - end[1], end[0] - center[0])
+        separation = abs(
+            (end_angle - start_angle + math.pi) % (2.0 * math.pi) - math.pi
+        )
+        if separation < math.radians(self.config.min_arc_degrees):
+            # Two scale ends at (nearly) the same spot around the dial is
+            # impossible on a real gauge; the model is confused (it happens
+            # on unusual layouts where it re-labels one end twice). Treat it
+            # as a detection failure so the caller can fall back.
+            raise ValueError(
+                "Scale end points are too close together ({:.1f} degrees)".format(
+                    math.degrees(separation)
+                )
+            )
         return MeterPoints(start, end, center, pointer, line)
 
     def _keypoint(self, detection: PoseDetection, index: int) -> Point:
